@@ -1,0 +1,58 @@
+services:
+  binance-oi-downloader:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: binance-oi-downloader
+    restart: unless-stopped
+
+    # 挂载配置文件和数据目录
+    volumes:
+      - ./config:/app/config:ro  # 只读挂载配置文件
+      - ./data:/app/data         # 读写挂载数据目录
+      - ./env:/app/env:ro        # 只读挂载环境变量文件
+
+    # 环境变量配置
+    environment:
+      - TZ=Asia/Shanghai  # 设置时区
+      - PYTHONPATH=/app
+      # 代理环境变量（如果需要）
+      - HTTP_PROXY=${HTTP_PROXY:-}
+      - HTTPS_PROXY=${HTTPS_PROXY:-}
+      - SOCKS_PROXY=${SOCKS_PROXY:-}
+
+    # 资源限制（可选）
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.25'
+        reservations:
+          memory: 128M
+          cpus: '0.1'
+
+    # 健康检查
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+    # 日志配置
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # 命令 - 默认启动定时下载
+    command: ["python", "main.py"]
+
+    # 工作目录
+    working_dir: /app
+
+# 卷定义（用于数据持久化）
+volumes:
+  binance-data:
+    driver: local

@@ -1,0 +1,12 @@
+include README.md
+include LICENSE
+include config/config_example.json
+include config/proxy_config_example.txt
+recursive-include scripts *.py
+recursive-include tests *.py
+prune data/
+prune logs/
+prune *.db
+prune *.sqlite*
+global-exclude *.pyc
+global-exclude __pycache__/

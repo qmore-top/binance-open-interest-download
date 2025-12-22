@@ -1,0 +1,37 @@
+{
+  "_comment": "币安数据爬虫配置文件示例",
+  "symbols": [
+    "BTCUSDT",
+    "ETHUSDT",
+    "BNBUSDT",
+    "ADAUSDT",
+    "XRPUSDT",
+    "SOLUSDT",
+    "DOTUSDT",
+    "DOGEUSDT",
+    "AVAXUSDT",
+    "LTCUSDT",
+    "BCHUSDT",
+    "LINKUSDT",
+    "UNIUSDT",
+    "ALGOUSDT",
+    "VETUSDT"
+  ],
+  "schedule": {
+    "enabled": true,
+    "interval_minutes": 1
+  },
+  "proxy": {
+    "http_proxy": "http://proxy.example.com:8080",
+    "https_proxy": "http://proxy.example.com:8080",
+    "socks_proxy": null
+  },
+  "storage": {
+    "save_to_db": true,
+    "cleanup_days": 30
+  },
+  "logging": {
+    "level": "INFO",
+    "file_enabled": true
+  }
+}

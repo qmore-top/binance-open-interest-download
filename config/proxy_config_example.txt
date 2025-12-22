@@ -1,0 +1,38 @@
+# 代理服务器配置示例
+# 您可以通过环境变量或命令行参数配置代理
+
+## 环境变量配置（推荐）
+
+# HTTP/HTTPS代理
+export HTTP_PROXY=http://proxy.example.com:8080
+export HTTPS_PROXY=http://proxy.example.com:8080
+
+# 或使用SOCKS5代理
+export SOCKS_PROXY=socks5://proxy.example.com:1080
+export ALL_PROXY=socks5://proxy.example.com:1080
+
+# 认证代理（如果需要用户名密码）
+export HTTP_PROXY=http://username:password@proxy.example.com:8080
+export HTTPS_PROXY=http://username:password@proxy.example.com:8080
+
+## 命令行参数配置
+
+# 使用HTTP代理
+python main.py --http-proxy http://proxy.example.com:8080 --symbol BTCUSDT
+
+# 使用SOCKS5代理
+python main.py --socks-proxy socks5://proxy.example.com:1080 --all
+
+## 支持的代理类型
+
+- HTTP代理: http://proxy.example.com:8080
+- HTTPS代理: http://proxy.example.com:8080
+- SOCKS4代理: socks4://proxy.example.com:1080
+- SOCKS5代理: socks5://proxy.example.com:1080
+
+## 注意事项
+
+1. 确保代理服务器稳定可靠
+2. SOCKS代理通常比HTTP代理更稳定
+3. 如果使用认证代理，请在URL中包含用户名密码
+4. 可以设置NO_PROXY环境变量来跳过某些域名的代理
