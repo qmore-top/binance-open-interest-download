@@ -11,7 +11,6 @@ import time
 import json
 import logging
 import threading
-from pathlib import Path
 import concurrent.futures
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Any
@@ -42,89 +41,6 @@ DEFAULT_SYMBOLS = [
     "SOLUSDT", "DOTUSDT", "DOGEUSDT", "AVAXUSDT", "LTCUSDT",
     "BCHUSDT", "LINKUSDT", "UNIUSDT", "ALGOUSDT", "VETUSDT"
 ]
-
-# 常量：错误统计文件路径，中文解释见注释
-ERROR_STATS_FILE = Path("data/error_statistics.json")
-
-
-def remove_error_symbols_from_config(config_path: str = "config/config.json") -> None:
-    """
-    从配置文件中移除错误交易对（仅移除明确的无效符号）
-    """
-    stats_path = ERROR_STATS_FILE
-    config_file = Path(config_path)
-
-    # 读取错误统计文件
-    if not stats_path.exists():
-        print("错误统计文件不存在，无法移除交易对")
-        return
-
-    try:
-        with open(stats_path, "r", encoding="utf-8") as f:
-            error_stats = json.load(f)
-    except Exception as e:
-        print(f"读取错误统计文件失败: {e}")
-        return
-
-    # 筛选可移除的交易对：API 错误且包含无效符号信息
-    removable = set()
-    for item in error_stats.get("details", []):
-        err_type = str(item.get("error_type", "")).lower()
-        msg = str(item.get("error_message", "")).lower()
-        symbol = item.get("symbol")
-        if not symbol:
-            continue
-        if err_type == "api_error" and ("1121" in msg or "invalid symbol" in msg):
-            removable.add(symbol)
-
-    if not removable:
-        print("未发现需要移除的不可恢复错误交易对（仅筛选无效符号/客户端错误）")
-        return
-
-    print(f"发现 {len(removable)} 个需要移除的交易对: {', '.join(sorted(removable))}")
-
-    # 读取配置文件
-    if not config_file.exists():
-        print("配置文件不存在，无法更新")
-        return
-
-    try:
-        with open(config_file, "r", encoding="utf-8") as f:
-            config_symbols = json.load(f)
-    except Exception as e:
-        print(f"读取配置文件失败: {e}")
-        return
-
-    # 仅支持列表格式，保持与现有配置兼容
-    if isinstance(config_symbols, dict) and "symbols" in config_symbols:
-        symbols_list = config_symbols.get("symbols", [])
-        config_as_dict = True
-    elif isinstance(config_symbols, list):
-        symbols_list = config_symbols
-        config_as_dict = False
-    else:
-        print("配置文件格式不支持，仅支持数组或包含 symbols 字段的对象")
-        return
-
-    # 移除标记为无效的交易对
-    original_count = len(symbols_list)
-    filtered_symbols = [s for s in symbols_list if s not in removable]
-    removed_count = original_count - len(filtered_symbols)
-
-    if removed_count == 0:
-        print("配置文件中未包含需要移除的交易对")
-        return
-
-    # 按原始格式写回
-    try:
-        payload = {"symbols": filtered_symbols} if config_as_dict else filtered_symbols
-        with open(config_file, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2, ensure_ascii=False)
-        print(f"成功从配置文件中移除 {removed_count} 个有错误的交易对")
-        print(f"更新后剩余 {len(filtered_symbols)} 个交易对")
-    except Exception as e:
-        print(f"保存配置文件失败: {e}")
-
 def get_proxy_config(http_proxy: Optional[str] = None,
                      https_proxy: Optional[str] = None,
                      socks_proxy: Optional[str] = None) -> Optional[Dict[str, str]]:
@@ -332,6 +248,13 @@ class BinanceOIDownloader:
             """信号处理函数"""
             logger.info(f"Received signal {signum}, initiating graceful shutdown...")
             self.shutdown_requested = True
+            try:
+                import schedule
+                schedule.clear()
+            except Exception:
+                pass
+            # 直接抛出中断，加速当前阻塞流程的退出
+            raise KeyboardInterrupt()
 
         # 注册信号处理器
         signal.signal(signal.SIGINT, signal_handler)  # Ctrl+C
@@ -800,22 +723,11 @@ def main():
     parser.add_argument("--cleanup", type=int, metavar="DAYS", help="清理指定天数前的旧数据")
     parser.add_argument("--hours", "-c", type=float, metavar="HOURS", help="持续下载指定小时数")
     parser.add_argument("--history-only", action="store_true", help="仅下载5分钟历史数据，不进行实时下载")
-    parser.add_argument("--remove-error-symbols", action="store_true", help="移除错误统计中标记为无效的交易对")
-
-    # 代理相关参数
-    parser.add_argument("--http-proxy", help="HTTP代理服务器 (例如: http://proxy.example.com:8080)")
-    parser.add_argument("--https-proxy", help="HTTPS代理服务器 (例如: http://proxy.example.com:8080)")
-    parser.add_argument("--socks-proxy", help="SOCKS代理服务器 (例如: socks5://proxy.example.com:1080)")
 
     args = parser.parse_args()
 
     # 加载配置（固定使用默认路径）
     config_path = "config/config.json"
-
-    # 独立执行：移除错误交易对并退出
-    if args.remove_error_symbols:
-        remove_error_symbols_from_config(config_path)
-        return
 
     config_manager = ConfigManager(config_path)
 
@@ -827,13 +739,8 @@ def main():
             print(f"  - {error}")
         sys.exit(1)
 
-    # 获取代理配置（命令行参数优先于配置文件）
-    config_proxy = config_manager.get_proxy_config()
-    proxy_config = get_proxy_config(
-        http_proxy=args.http_proxy or config_proxy.get("http_proxy"),
-        https_proxy=args.https_proxy or config_proxy.get("https_proxy"),
-        socks_proxy=args.socks_proxy or config_proxy.get("socks_proxy")
-    )
+    # 获取代理配置（使用环境变量）
+    proxy_config = get_proxy_config()
 
     # 获取存储配置
     data_dir = config_manager.get_data_dir()
