@@ -239,6 +239,20 @@ class BinanceDownloader:
 
         data = self._make_request(endpoint, params)
         if data:
+            # 尝试获取标记价用于计算名义价值
+            try:
+                price = self.get_mark_price(symbol)
+                if price is not None:
+                    oi_float = float(data.get("openInterest", 0))
+                    price_float = float(price)
+                    data["sumOpenInterestValue"] = oi_float * price_float
+                else:
+                    logger.warning(f"{symbol} 获取标记价返回空，sumOpenInterestValue 留空")
+                    data["sumOpenInterestValue"] = None
+            except Exception as e:
+                logger.warning(f"计算名义价值失败 {symbol}: {e}")
+                data["sumOpenInterestValue"] = None
+
             # 添加时间戳 - 如果提供自定义时间戳则使用，否则使用当前时间
             if custom_timestamp is not None:
                 data["timestamp"] = custom_timestamp
@@ -251,6 +265,20 @@ class BinanceDownloader:
             return data
 
         return None
+
+    def get_mark_price(self, symbol: str) -> Optional[float]:
+        """
+        获取最新标记价格
+        """
+        endpoint = "/fapi/v1/premiumIndex"
+        params = {"symbol": symbol.upper()}
+        data = self._make_request(endpoint, params)
+        if not data:
+            return None
+        try:
+            return float(data.get("markPrice"))
+        except Exception:
+            return None
 
     def get_multiple_symbols_oi(self, symbols: List[str]) -> Dict[str, Optional[Dict]]:
         """

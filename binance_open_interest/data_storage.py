@@ -76,16 +76,16 @@ class DataStorage:
             with open(filepath, 'a', encoding='utf-8', newline='') as f:
                 writer = csv.writer(f)
                 
-                # 如果是新文件，写入表头
+                # 如果是新文件，写入表头（去掉 symbol 列）
                 if not file_exists:
-                    writer.writerow(["timestamp", "datetime", "symbol", "openInterest"])
+                    writer.writerow(["timestamp", "datetime", "openInterest", "sumOpenInterestValue"])
                 
-                # 写入数据
+                # 写入数据（去掉 symbol 列）
                 writer.writerow([
                     data.get("timestamp", ""),
                     data.get("datetime", ""),
-                    data.get("symbol", ""),
-                    data.get("openInterest", "")
+                    data.get("openInterest", ""),
+                    data.get("sumOpenInterestValue", "")
                 ])
             
             logger.info(f"保存未平仓合约数据: {filepath}")
@@ -177,13 +177,12 @@ class DataStorage:
                 with open(filepath, "a", encoding="utf-8", newline="") as f:
                     writer = csv.writer(f)
                     if not file_exists:
-                        # 5分钟历史数据表头
-                        writer.writerow(["timestamp", "datetime", "symbol", "openInterest", "sumOpenInterestValue"])
+                        # 5分钟历史数据表头（去掉 symbol）
+                        writer.writerow(["timestamp", "datetime", "openInterest", "sumOpenInterestValue"])
 
                     writer.writerow([
                         record.get("timestamp", ""),
                         dt.isoformat(),
-                        record.get("symbol", symbol),
                         record.get("sumOpenInterest", record.get("openInterest", "")),
                         record.get("sumOpenInterestValue", "")
                     ])
