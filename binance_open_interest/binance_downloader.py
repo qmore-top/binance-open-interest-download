@@ -234,7 +234,8 @@ class BinanceDownloader:
     def get_oi_history(self,
                        symbol: str,
                        date_str: str,
-                       limit: int = 1000) -> Optional[List[Dict[str, Any]]]:
+                       limit: int = 1000,
+                       start_timestamp: Optional[int] = None) -> Optional[List[Dict[str, Any]]]:
         """
         获取指定日期的5分钟历史未平仓数据（按天下载，受币安限制：最多1000条）
 
@@ -242,21 +243,30 @@ class BinanceDownloader:
             symbol: 交易对
             date_str: 日期字符串，格式为 "YYYY-MM-DD"（UTC日期）
             limit: 每次拉取条数，最大1000
+            start_timestamp: 开始时间戳（毫秒），如果提供则从此时间开始下载，否则从当天开始
 
         Returns:
             历史记录列表或None
         """
         try:
-            # 解析日期，创建UTC时间范围
             from datetime import datetime, timezone
-            # 创建UTC日期对象（naive datetime + UTC时区）
-            date_obj = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
 
-            # 当天的开始时间（UTC 00:00:00）
-            start_time_ms = int(date_obj.timestamp() * 1000)
+            if start_timestamp:
+                # 使用提供的开始时间戳
+                start_time_ms = start_timestamp
+                # 结束时间是当天23:59:59.999
+                date_obj = datetime.utcfromtimestamp(start_timestamp / 1000).replace(hour=23, minute=59, second=59, microsecond=999999)
+                end_time_ms = int(date_obj.timestamp() * 1000)
+            else:
+                # 解析日期，创建UTC时间范围
+                # 创建UTC日期对象（naive datetime + UTC时区）
+                date_obj = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
 
-            # 当天的结束时间（UTC 23:59:59.999）
-            end_time_ms = start_time_ms + (24 * 60 * 60 * 1000) - 1
+                # 当天的开始时间（UTC 00:00:00）
+                start_time_ms = int(date_obj.timestamp() * 1000)
+
+                # 当天的结束时间（UTC 23:59:59.999）
+                end_time_ms = start_time_ms + (24 * 60 * 60 * 1000) - 1
 
         except ValueError as e:
             logger.error(f"无效的日期格式 {date_str}: {e}")

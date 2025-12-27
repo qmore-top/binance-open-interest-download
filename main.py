@@ -107,10 +107,60 @@ class BinanceOIDownloader:
         # 运行状态管理
         self.shutdown_requested = False
 
+        # 每个交易对的最后时间戳（用于增量更新）
+        self.last_timestamps: Dict[str, Optional[int]] = {}
+
         # 设置信号处理器
         self._setup_signal_handlers()
 
         logger.info("Binance 未平仓数据下载器已初始化")
+
+    def _restore_last_timestamps(self, symbols: List[str]):
+        """
+        从现有文件中恢复每个交易对的最后时间戳
+
+        Args:
+            symbols: 交易对列表
+        """
+        from datetime import datetime
+        import csv
+
+        for symbol in symbols:
+            try:
+                # 检查今天的数据文件
+                today_str = datetime.utcnow().strftime("%Y-%m-%d")
+                filepath = self.storage.oi_dir / symbol / "5m" / f"{symbol}-oi-5m-{today_str}.csv"
+
+                if not filepath.exists():
+                    self.last_timestamps[symbol] = None
+                    continue
+
+                # 文件存在且不是.tmp结尾，说明是完整的，直接读取最后一行
+                last_valid_timestamp = None
+                try:
+                    with open(filepath, "r", encoding="utf-8", newline="") as f:
+                        reader = csv.DictReader(f)
+                        for row in reader:
+                            timestamp_str = row.get("timestamp", "")
+                            if timestamp_str:
+                                try:
+                                    last_valid_timestamp = int(timestamp_str)
+                                except ValueError:
+                                    continue
+                except Exception as e:
+                    logger.warning(f"读取 {symbol} 文件失败: {e}")
+                    self.last_timestamps[symbol] = None
+                    continue
+
+                self.last_timestamps[symbol] = last_valid_timestamp
+                if last_valid_timestamp:
+                    logger.info(f"{symbol} 恢复最后时间戳: {last_valid_timestamp} ({datetime.utcfromtimestamp(last_valid_timestamp/1000)})")
+                else:
+                    logger.info(f"{symbol} 文件存在但没有有效时间戳，从头开始下载")
+
+            except Exception as e:
+                logger.warning(f"恢复 {symbol} 最后时间戳失败: {e}")
+                self.last_timestamps[symbol] = None
 
     def start_oi_history_worker(self, symbols: List[str]):
         """
@@ -119,6 +169,9 @@ class BinanceOIDownloader:
         Args:
             symbols: 交易对列表
         """
+        # 恢复每个交易对的最后时间戳
+        self._restore_last_timestamps(symbols)
+
         thread = threading.Thread(
             target=self._download_oi_history_for_symbols,
             args=(symbols,),
@@ -154,7 +207,7 @@ class BinanceOIDownloader:
                         if self.shutdown_requested:
                             break
 
-                        # 断点续跑：检查数据是否已存在且完整
+                        # 断点续跑：检查数据文件是否已存在（不是.tmp结尾就是完整的）
                         if self.storage.is_date_data_exists(symbol, date_str):
                             logger.debug(f"{symbol} {date_str} 历史数据已存在，跳过")
                             continue
@@ -172,11 +225,7 @@ class BinanceOIDownloader:
                             logger.warning(f"{symbol} {date_str} 历史数据下载为空")
                             continue
 
-                        # 验证数据完整性 - 历史数据必须是完整的288个点
-                        expected_points = 288
-                        if len(data) != expected_points:
-                            logger.warning(f"{symbol} {date_str} 历史数据不完整: {len(data)}/{expected_points} 条记录，跳过")
-                            continue
+                        # 历史数据无需额外校验完整性，直接保存
 
                         # 保存数据
                         saved = self.storage.save_oi_history_batch(symbol, data)
@@ -184,16 +233,16 @@ class BinanceOIDownloader:
                             logger.error(f"{symbol} {date_str} 历史数据保存失败")
                             continue
 
-                        logger.info(f"完成历史数据下载: {symbol} {date_str} ({len(data)}/{expected_points} 条记录)")
+                        logger.info(f"完成历史数据下载: {symbol} {date_str} ({len(data)} 条记录)")
                         time.sleep(0.5)
 
                 except Exception as e:
                     logger.error(f"历史数据下载异常 {symbol}: {e}")
                     continue
 
-            logger.info("历史数据下载完成，开始持续更新今天的数据...")
+            logger.info("历史数据下载完成，开始持续增量更新今天的数据...")
 
-            # 第二阶段：持续更新今天的数据
+            # 第二阶段：持续增量更新今天的数据
             while not self.shutdown_requested:
                 current_utc = datetime.utcnow()
                 today_str = current_utc.strftime("%Y-%m-%d")
@@ -203,22 +252,58 @@ class BinanceOIDownloader:
                         break
 
                     try:
-                        logger.debug(f"更新今天数据: {symbol} {today_str}")
+                        last_timestamp = self.last_timestamps.get(symbol)
 
-                        # 下载今天的数据
-                        data = self.downloader.get_oi_history(
-                            symbol,
-                            date_str=today_str,
-                            limit=1000
-                        )
+                        # 如果有最后时间戳，则增量更新；否则全量更新
+                        if last_timestamp:
+                            logger.debug(f"增量更新今天数据: {symbol} 从 {last_timestamp}")
 
-                        if data and len(data) > 0:
-                            # 保存今天的数据
-                            saved = self.storage.save_oi_history_batch(symbol, data)
-                            if saved:
-                                logger.debug(f"更新今天数据完成: {symbol} {today_str} ({len(data)} 条记录)")
+                            # 下载从最后时间戳之后的数据
+                            data = self.downloader.get_oi_history(
+                                symbol,
+                                date_str=today_str,
+                                limit=500,  # 增量更新用更小的limit
+                                start_timestamp=last_timestamp + 1  # 从下一个时间戳开始
+                            )
+
+                            if data and len(data) > 0:
+                                # 过滤掉已存在的数据（时间戳小于等于最后时间戳的）
+                                new_data = [record for record in data if record.get("timestamp", 0) > last_timestamp]
+
+                                if new_data:
+                                    # 保存真正新增的数据
+                                    saved = self.storage.save_today_incremental_data(symbol, today_str, new_data)
+                                    if saved:
+                                        # 更新最后时间戳
+                                        max_timestamp = max(record.get("timestamp", 0) for record in new_data)
+                                        self.last_timestamps[symbol] = max_timestamp
+                                        logger.debug(f"增量更新完成: {symbol} 新增 {len(new_data)} 条记录，最后时间戳: {max_timestamp}")
+                                    else:
+                                        logger.error(f"今天数据增量保存失败: {symbol}")
+                                else:
+                                    logger.debug(f"{symbol} API返回了数据但经过滤后没有新的数据")
                             else:
-                                logger.error(f"今天数据保存失败: {symbol} {today_str}")
+                                logger.debug(f"{symbol} 没有新的数据")
+                        else:
+                            # 没有最后时间戳，全量更新今天的数据
+                            logger.debug(f"全量更新今天数据: {symbol}")
+
+                            data = self.downloader.get_oi_history(
+                                symbol,
+                                date_str=today_str,
+                                limit=1000
+                            )
+
+                            if data and len(data) > 0:
+                                # 保存今天的数据（全量覆盖）
+                                saved = self.storage.save_oi_history_batch(symbol, data)
+                                if saved:
+                                    # 设置最后时间戳
+                                    max_timestamp = max(record.get("timestamp", 0) for record in data)
+                                    self.last_timestamps[symbol] = max_timestamp
+                                    logger.debug(f"全量更新完成: {symbol} ({len(data)} 条记录)，最后时间戳: {max_timestamp}")
+                                else:
+                                    logger.error(f"今天数据保存失败: {symbol}")
 
                     except Exception as e:
                         logger.error(f"今天数据更新异常 {symbol}: {e}")

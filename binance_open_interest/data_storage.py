@@ -243,6 +243,58 @@ class DataStorage:
 
             logger.info(f"保存历史OI数据: {symbol}, {len(records)} 条记录，{len(records_by_date)} 个日期")
             return True
+
+        except Exception as e:
+            logger.error(f"保存历史OI数据失败: {e}")
+            return False
+
+    def save_today_incremental_data(self, symbol: str, date_str: str, records: List[Dict]) -> bool:
+        """
+        增量保存今天的数据（追加到现有文件）
+
+        Args:
+            symbol: 交易对
+            date_str: 日期字符串
+            records: 要追加的记录列表
+
+        Returns:
+            保存是否成功
+        """
+        try:
+            if not records:
+                return True
+
+            filename = f"{symbol}-oi-5m-{date_str}.csv"
+            filepath = self.oi_dir / symbol / "5m" / filename
+            filepath.parent.mkdir(parents=True, exist_ok=True)
+
+            # 检查文件是否存在，确定是否需要写入表头
+            file_exists = filepath.exists()
+
+            # 直接追加到现有文件（今天的数据增量追加）
+            with open(filepath, "a", encoding="utf-8", newline="") as f:
+                writer = csv.writer(f)
+
+                # 如果文件不存在，先写入表头
+                if not file_exists:
+                    writer.writerow(["timestamp", "datetime_utc", "openInterest", "sumOpenInterestValue"])
+
+                # 追加新数据
+                for record in records:
+                    dt = datetime.utcfromtimestamp(int(record.get("timestamp", 0)) / 1000)
+                    writer.writerow([
+                        record.get("timestamp", ""),
+                        dt.isoformat() + "Z",  # UTC时间格式
+                        record.get("sumOpenInterest", record.get("openInterest", "")),
+                        record.get("sumOpenInterestValue", "")
+                    ])
+
+            logger.debug(f"增量保存今天数据: {filepath} 新增 {len(records)} 条记录")
+            return True
+
+        except Exception as e:
+            logger.error(f"增量保存今天数据失败: {e}")
+            return False
         except Exception as e:
             logger.error(f"保存历史OI数据失败: {e}")
             return False
