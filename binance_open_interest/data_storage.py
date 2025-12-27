@@ -44,6 +44,30 @@ class DataStorage:
             directory.mkdir(parents=True, exist_ok=True)
             logger.debug(f"创建目录: {directory}")
 
+        # 清理可能的中断临时文件
+        self._cleanup_temp_files()
+
+    def _cleanup_temp_files(self):
+        """清理中断过程中留下的临时文件"""
+        try:
+            temp_files = []
+            # 查找所有.tmp文件
+            for pattern in ["**/*.tmp"]:
+                temp_files.extend(self.base_dir.glob(pattern))
+
+            if temp_files:
+                logger.info(f"发现 {len(temp_files)} 个临时文件，正在清理...")
+                for temp_file in temp_files:
+                    try:
+                        temp_file.unlink()
+                        logger.debug(f"删除临时文件: {temp_file}")
+                    except Exception as e:
+                        logger.warning(f"删除临时文件失败: {temp_file} - {e}")
+            else:
+                logger.debug("没有发现临时文件")
+        except Exception as e:
+            logger.warning(f"清理临时文件时出错: {e}")
+
     def save_open_interest_data(self, symbol: str, data: Dict, data_type: str = "realtime") -> bool:
         """
         保存未平仓合约数据（使用UTC时间）
@@ -178,27 +202,44 @@ class DataStorage:
                     records_by_date[date_str] = []
                 records_by_date[date_str].append(record)
 
-            # 为每个日期保存数据
+            # 为每个日期保存数据（使用临时文件确保原子性）
             for date_str, date_records in records_by_date.items():
                 filename = f"{symbol}-oi-5m-{date_str}.csv"
                 filepath = self.oi_dir / symbol / "5m" / filename
                 filepath.parent.mkdir(parents=True, exist_ok=True)
 
-                file_exists = filepath.exists()
-                with open(filepath, "a", encoding="utf-8", newline="") as f:
-                    writer = csv.writer(f)
-                    if not file_exists:
+                # 使用临时文件确保原子性
+                temp_filepath = filepath.with_suffix(".tmp")
+                final_filepath = filepath
+
+                try:
+                    # 写入临时文件（历史数据每次都是完整的一天，直接覆盖）
+                    with open(temp_filepath, "w", encoding="utf-8", newline="") as f:
+                        writer = csv.writer(f)
                         # 历史数据表头
                         writer.writerow(["timestamp", "datetime_utc", "openInterest", "sumOpenInterestValue"])
 
-                    for record in date_records:
-                        dt = datetime.utcfromtimestamp(int(record.get("timestamp", 0)) / 1000)
-                        writer.writerow([
-                            record.get("timestamp", ""),
-                            dt.isoformat() + "Z",  # UTC时间格式
-                            record.get("sumOpenInterest", record.get("openInterest", "")),
-                            record.get("sumOpenInterestValue", "")
-                        ])
+                        for record in date_records:
+                            dt = datetime.utcfromtimestamp(int(record.get("timestamp", 0)) / 1000)
+                            writer.writerow([
+                                record.get("timestamp", ""),
+                                dt.isoformat() + "Z",  # UTC时间格式
+                                record.get("sumOpenInterest", record.get("openInterest", "")),
+                                record.get("sumOpenInterestValue", "")
+                            ])
+
+                    # 原子性重命名：临时文件 -> 正式文件
+                    temp_filepath.replace(filepath)
+                    logger.debug(f"历史数据文件写入完成: {filepath}")
+
+                except Exception as e:
+                    # 如果出错，清理临时文件
+                    try:
+                        if temp_filepath.exists():
+                            temp_filepath.unlink()
+                    except Exception:
+                        pass
+                    raise e
 
             logger.info(f"保存历史OI数据: {symbol}, {len(records)} 条记录，{len(records_by_date)} 个日期")
             return True

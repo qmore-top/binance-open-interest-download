@@ -128,78 +128,105 @@ class BinanceOIDownloader:
         logger.info(f"已启动5分钟历史数据线程，交易对数: {len(symbols)}")
 
     def _download_oi_history_for_symbols(self, symbols: List[str]):
-        """后台线程：为多个交易对下载历史数据（按天下载，持续循环）"""
+        """后台线程：下载历史数据一次，然后持续更新今天的数据"""
         from datetime import datetime, timedelta
 
         try:
+            # 第一阶段：下载最近30天的完整历史数据（只执行一次）
+            logger.info("开始下载最近30天的完整历史数据...")
+            current_utc = datetime.utcnow()
+            today_str = current_utc.strftime("%Y-%m-%d")
+
+            # 生成最近29天的日期列表（包括今天，从旧到新）
+            history_dates = []
+            for i in range(29, -1, -1):  # 从29天前到今天（从旧到新）
+                date_obj = current_utc - timedelta(days=i)
+                date_str = date_obj.strftime("%Y-%m-%d")
+                history_dates.append(date_str)
+
+            # 下载历史数据 - 支持断点续跑
+            for symbol in symbols:
+                if self.shutdown_requested:
+                    break
+
+                try:
+                    for date_str in history_dates:
+                        if self.shutdown_requested:
+                            break
+
+                        # 断点续跑：检查数据是否已存在且完整
+                        if self.storage.is_date_data_exists(symbol, date_str):
+                            logger.debug(f"{symbol} {date_str} 历史数据已存在，跳过")
+                            continue
+
+                        logger.info(f"下载历史数据: {symbol} {date_str}")
+
+                        # 下载这一天的数据
+                        data = self.downloader.get_oi_history(
+                            symbol,
+                            date_str=date_str,
+                            limit=1000
+                        )
+
+                        if not data:
+                            logger.warning(f"{symbol} {date_str} 历史数据下载为空")
+                            continue
+
+                        # 验证数据完整性 - 历史数据必须是完整的288个点
+                        expected_points = 288
+                        if len(data) != expected_points:
+                            logger.warning(f"{symbol} {date_str} 历史数据不完整: {len(data)}/{expected_points} 条记录，跳过")
+                            continue
+
+                        # 保存数据
+                        saved = self.storage.save_oi_history_batch(symbol, data)
+                        if not saved:
+                            logger.error(f"{symbol} {date_str} 历史数据保存失败")
+                            continue
+
+                        logger.info(f"完成历史数据下载: {symbol} {date_str} ({len(data)}/{expected_points} 条记录)")
+                        time.sleep(0.5)
+
+                except Exception as e:
+                    logger.error(f"历史数据下载异常 {symbol}: {e}")
+                    continue
+
+            logger.info("历史数据下载完成，开始持续更新今天的数据...")
+
+            # 第二阶段：持续更新今天的数据
             while not self.shutdown_requested:
-                # 获取当前UTC日期
                 current_utc = datetime.utcnow()
                 today_str = current_utc.strftime("%Y-%m-%d")
-
-                # 检查是否有昨天的数据需要下载（避免下载不完整的数据）
-                yesterday = current_utc - timedelta(days=1)
-                yesterday_str = yesterday.strftime("%Y-%m-%d")
-
-                # 要下载的日期列表（昨天的数据应该已经完整了）
-                dates_to_download = [yesterday_str]
-
-                # 如果是新的一天，也下载今天的数据（到目前为止）
-                if current_utc.hour >= 1:  # 至少过了一个小时再下载今天的数据
-                    dates_to_download.append(today_str)
 
                 for symbol in symbols:
                     if self.shutdown_requested:
                         break
 
                     try:
-                        for date_str in dates_to_download:
-                            if self.shutdown_requested:
-                                break
+                        logger.debug(f"更新今天数据: {symbol} {today_str}")
 
-                            # 检查这一天的数据文件是否已经存在
-                            if self.storage.is_date_data_exists(symbol, date_str):
-                                logger.debug(f"{symbol} {date_str} 数据已存在，跳过")
-                                continue
+                        # 下载今天的数据
+                        data = self.downloader.get_oi_history(
+                            symbol,
+                            date_str=today_str,
+                            limit=1000
+                        )
 
-                            logger.info(f"下载历史数据: {symbol} {date_str}")
-
-                            # 下载这一天的数据
-                            data = self.downloader.get_oi_history(
-                                symbol,
-                                date_str=date_str,
-                                limit=1000
-                            )
-
-                            if not data:
-                                logger.warning(f"{symbol} {date_str} 历史数据下载为空")
-                                continue
-
-                            # 保存数据
+                        if data and len(data) > 0:
+                            # 保存今天的数据
                             saved = self.storage.save_oi_history_batch(symbol, data)
-                            if not saved:
-                                logger.error(f"{symbol} {date_str} 历史数据保存失败")
-                                continue
-
-                            logger.info(f"完成历史数据下载: {symbol} {date_str} ({len(data)} 条记录)")
-
-                            # 轻微节流
-                            time.sleep(0.5)
+                            if saved:
+                                logger.debug(f"更新今天数据完成: {symbol} {today_str} ({len(data)} 条记录)")
+                            else:
+                                logger.error(f"今天数据保存失败: {symbol} {today_str}")
 
                     except Exception as e:
-                        logger.error(f"历史数据下载异常 {symbol}: {e}")
-                        self.error_handler.handle_error_with_fallback(
-                            symbol=symbol,
-                            error=e,
-                            downloader=self.downloader,
-                            storage=self.storage,
-                            source="history"
-                        )
+                        logger.error(f"今天数据更新异常 {symbol}: {e}")
                         continue
 
-                # 等待下一轮检查（每小时检查一次）
-                logger.info("历史数据下载轮次完成，等待下一轮...")
-                for _ in range(3600):  # 3600秒 = 1小时
+                # 等待5分钟后再次更新今天的数据
+                logger.debug("今天数据更新完成，等待5分钟...")
+                for _ in range(300):  # 300秒 = 5分钟
                     if self.shutdown_requested:
                         break
                     time.sleep(1)
@@ -431,8 +458,9 @@ class BinanceOIDownloader:
             Whether download was successful
         """
         if use_integer_minute:
-            # 计算当前整数分钟的时间戳（毫秒）
-            now = datetime.now()
+            # 计算当前整数分钟的时间戳（毫秒，使用UTC时间）
+            from datetime import timezone
+            now = datetime.now(timezone.utc)
             current_minute = now.replace(second=0, microsecond=0)
             custom_timestamp = int(current_minute.timestamp() * 1000)
             logger.info(f"使用整数分钟时间戳: {custom_timestamp} ({current_minute.isoformat()})")
@@ -448,7 +476,6 @@ class BinanceOIDownloader:
 
         Args:
             symbols: 交易对列表
-            resume_task_id: 恢复任务ID（可选）
 
         Returns:
             每个交易对的下载结果字典
@@ -456,8 +483,9 @@ class BinanceOIDownloader:
         logger.info(f"开始批量下载 {len(symbols)} 个交易对")
 
         start_time = time.time()
-        # 使用同一个整数分钟时间戳，避免串行延迟导致数据时间不一致
-        batch_timestamp = int(datetime.now().replace(second=0, microsecond=0).timestamp() * 1000)
+        # 使用同一个整数分钟时间戳，避免串行延迟导致数据时间不一致（使用UTC时间）
+        from datetime import timezone
+        batch_timestamp = int(datetime.now(timezone.utc).replace(second=0, microsecond=0).timestamp() * 1000)
         logger.info(f"批量下载使用统一整数分钟时间戳: {batch_timestamp} ({datetime.fromtimestamp(batch_timestamp/1000).isoformat()})")
 
         results: Dict[str, bool] = {}
@@ -606,7 +634,6 @@ class BinanceOIDownloader:
             logger.info(f"Continuous download interrupted after {download_count} downloads, total time: {total_duration:.1f} seconds")
         else:
             logger.info(f"Continuous download finished, {download_count} downloads completed, total time: {total_duration:.1f} seconds")
-            self._complete_task(task_id)
 
 def main():
     """Main function"""

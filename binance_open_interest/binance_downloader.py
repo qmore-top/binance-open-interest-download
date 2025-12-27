@@ -248,8 +248,9 @@ class BinanceDownloader:
         """
         try:
             # 解析日期，创建UTC时间范围
-            from datetime import datetime
-            date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+            from datetime import datetime, timezone
+            # 创建UTC日期对象（naive datetime + UTC时区）
+            date_obj = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
 
             # 当天的开始时间（UTC 00:00:00）
             start_time_ms = int(date_obj.timestamp() * 1000)
