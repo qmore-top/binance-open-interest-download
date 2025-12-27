@@ -677,7 +677,6 @@ def main():
         logger.info(f"仅下载5分钟历史数据，运行 {run_minutes} 分钟后退出")
         try:
             # 等待历史数据下载线程运行指定时间，然后退出
-            import time
             logger.info("等待历史数据下载中... (按Ctrl+C退出)")
             time.sleep(run_minutes * 60)  # 等待指定分钟数
         except KeyboardInterrupt:
@@ -690,12 +689,12 @@ def main():
             downloader.show_statistics()
 
         elif not any([args.stats, args.hours]):
-            # 定时下载模式（每5分钟拉取一次）
-            interval_minutes = 5
-            print(f"启动定时模式，每 {interval_minutes} 分钟拉取: {target_symbols}")
+            # 定时下载模式（每1分钟拉取一次实时数据）
+            interval_minutes = 1
+            print(f"启动定时模式，每 {interval_minutes} 分钟拉取实时数据: {target_symbols}")
             print(f"使用的配置文件: {config_manager.get_config_path()}")
             print(config_manager.get_config_summary())
-            logger.info("按5分钟间隔调度")
+            logger.info("按1分钟间隔调度实时数据")
 
             def scheduled_job():
                 if downloader.shutdown_requested:
