@@ -128,100 +128,7 @@ class BinanceDownloader:
 
         return None
 
-    def get_historical_open_interest(self, symbol: str, lookback_minutes: int = 5) -> Optional[Dict]:
-        """
-        获取指定交易对的历史未平仓合约数据（用于错误后的兜底）
 
-        Args:
-            symbol: 交易对符号
-            lookback_minutes: 回溯分钟数
-
-        Returns:
-            最近一条历史未平仓数据，或None
-        """
-        # 仅支持5分钟粒度，回溯窗口用 lookback_minutes 控制
-        end_time_ms = int(time.time() * 1000)
-        start_time_ms = end_time_ms - max(lookback_minutes, self.OI_MIN_INTERVAL_MINUTES) * 60 * 1000
-
-        history = self.get_oi_history(
-            symbol=symbol,
-            start_time_ms=start_time_ms,
-            end_time_ms=end_time_ms,
-            limit=1,
-            interval_minutes=5
-        )
-
-        if not history:
-            logger.warning(f"{symbol} 未获取到历史未平仓数据作为兜底")
-            return None
-
-        latest = history[-1]
-        timestamp = latest.get("timestamp")
-        if timestamp is None:
-            logger.warning(f"{symbol} 历史数据缺少时间戳，跳过兜底")
-            return None
-
-        return {
-            "symbol": latest.get("symbol", symbol.upper()),
-            "openInterest": latest.get("sumOpenInterest"),
-            "timestamp": timestamp,
-            "datetime": datetime.fromtimestamp(timestamp / 1000).isoformat()
-        }
-
-    def validate_interval(self, interval_minutes: int, for_oi_history: bool = True) -> Dict[str, Any]:
-        """
-        验证时间间隔是否适合币安数据
-
-        Args:
-            interval_minutes: 时间间隔（分钟）
-            for_oi_history: 是否用于OI历史数据（如果为True，则只检查OI历史API支持的间隔）
-
-        Returns:
-            验证结果字典
-        """
-        result = {
-            "valid": True,
-            "recommended_interval": 5,  # 总是推荐5分钟
-            "warnings": [],
-            "errors": []
-        }
-
-        # 对于OI历史数据，只支持5分钟间隔
-        if for_oi_history:
-            if interval_minutes != 5:
-                result["valid"] = False
-                result["errors"].append(f"币安OI历史数据只支持5分钟间隔，不支持{interval_minutes}分钟间隔")
-                result["errors"].append("必须使用5分钟间隔获取历史数据")
-        else:
-            # 对于其他用途，使用标准间隔检查
-            intervals_to_check = self.SUPPORTED_INTERVALS
-            if interval_minutes not in intervals_to_check:
-                result["valid"] = False
-                result["errors"].append(f"不支持的时间间隔: {interval_minutes}分钟")
-                closest_interval = min(intervals_to_check.keys(),
-                                     key=lambda x: abs(x - interval_minutes))
-                result["recommended_interval"] = closest_interval
-                result["errors"].append(f"建议使用: {closest_interval}分钟间隔")
-
-        return result
-
-    def get_recommended_interval(self, requested_interval: int) -> int:
-        """
-        获取推荐的时间间隔
-
-        Args:
-            requested_interval: 请求的间隔
-
-        Returns:
-            推荐的间隔
-        """
-        # 如果请求的间隔有效，直接返回
-        if requested_interval in self.SUPPORTED_INTERVALS:
-            return requested_interval
-
-        # 否则返回最接近的可用间隔
-        return min(self.SUPPORTED_INTERVALS.keys(),
-                  key=lambda x: abs(x - requested_interval))
 
     def get_open_interest(self, symbol: str, custom_timestamp: Optional[int] = None) -> Optional[Dict]:
         """
@@ -253,13 +160,13 @@ class BinanceDownloader:
                 logger.warning(f"计算名义价值失败 {symbol}: {e}")
                 data["sumOpenInterestValue"] = None
 
-            # 添加时间戳 - 如果提供自定义时间戳则使用，否则使用当前时间
+            # 添加时间戳 - 如果提供自定义时间戳则使用，否则使用当前UTC时间
             if custom_timestamp is not None:
                 data["timestamp"] = custom_timestamp
-                data["datetime"] = datetime.fromtimestamp(custom_timestamp / 1000).isoformat()
+                data["datetime"] = datetime.utcfromtimestamp(custom_timestamp / 1000).isoformat() + "Z"
             else:
                 data["timestamp"] = int(time.time() * 1000)
-                data["datetime"] = datetime.now().isoformat()
+                data["datetime"] = datetime.utcnow().isoformat() + "Z"
 
             logger.info(f"成功获取 {symbol} 未平仓合约: {data.get('openInterest', 'N/A')} (时间戳: {data['timestamp']})")
             return data
@@ -326,26 +233,32 @@ class BinanceDownloader:
 
     def get_oi_history(self,
                        symbol: str,
-                       start_time_ms: int,
-                       end_time_ms: int,
-                       limit: int = 1000,
-                       interval_minutes: int = 5) -> Optional[List[Dict[str, Any]]]:
+                       date_str: str,
+                       limit: int = 1000) -> Optional[List[Dict[str, Any]]]:
         """
-        获取5分钟历史未平仓数据（受币安限制：最多1000条，时间范围仅30天内）
+        获取指定日期的5分钟历史未平仓数据（按天下载，受币安限制：最多1000条）
 
         Args:
             symbol: 交易对
-            start_time_ms: 起始时间戳（毫秒）
-            end_time_ms: 结束时间戳（毫秒）
+            date_str: 日期字符串，格式为 "YYYY-MM-DD"（UTC日期）
             limit: 每次拉取条数，最大1000
-            interval_minutes: 时间间隔，必须为5
 
         Returns:
             历史记录列表或None
         """
-        # 币安官方接口仅支持5m
-        if interval_minutes != 5:
-            logger.error("OI历史数据仅支持5分钟间隔")
+        try:
+            # 解析日期，创建UTC时间范围
+            from datetime import datetime
+            date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+
+            # 当天的开始时间（UTC 00:00:00）
+            start_time_ms = int(date_obj.timestamp() * 1000)
+
+            # 当天的结束时间（UTC 23:59:59.999）
+            end_time_ms = start_time_ms + (24 * 60 * 60 * 1000) - 1
+
+        except ValueError as e:
+            logger.error(f"无效的日期格式 {date_str}: {e}")
             return None
 
         params = {
@@ -362,4 +275,5 @@ class BinanceDownloader:
             return None
 
         # 接口返回列表，每项包含sumOpenInterest等字段
+        logger.info(f"获取 {symbol} {date_str} 历史数据: {len(data)} 条记录")
         return data

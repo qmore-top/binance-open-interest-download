@@ -128,7 +128,6 @@ python update_config_with_top_symbols.py
 python main.py --symbols BTCUSDT                 # 1 分钟实时调度
 python main.py --hours 4 --symbols BTCUSDT       # 持续模式，按整数分钟循环
 python main.py --history-only --symbols BTCUSDT  # 仅跑 5m 历史补数
-python main.py --cleanup 30                      # 清理 30 天前数据
 python main.py --stats                           # 查看存储统计
 ```
 
@@ -154,7 +153,6 @@ python scripts/remove_error_symbols.py
 - `--symbols/-S` 指定交易对，留空则用配置文件
 - `--hours/-c` 持续模式（单位小时，按整数分钟循环）
 - `--history-only` 仅跑 5m 历史补数
-- `--cleanup` 清理早于指定天数的数据
 - `--stats` 查看存储统计
 - 代理：环境变量 `HTTP_PROXY` / `HTTPS_PROXY` / `SOCKS_PROXY`
 

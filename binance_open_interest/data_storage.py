@@ -46,7 +46,7 @@ class DataStorage:
 
     def save_open_interest_data(self, symbol: str, data: Dict, data_type: str = "realtime") -> bool:
         """
-        保存未平仓合约数据
+        保存未平仓合约数据（使用UTC时间）
 
         Args:
             symbol: 交易对符号
@@ -57,37 +57,38 @@ class DataStorage:
             保存是否成功
         """
         try:
-            now = datetime.now()
+            now_utc = datetime.utcnow()
             # 实时数据：按日存储 data/open_interest/{symbol}/1m/{symbol}-oi-{yyyy-mm-dd}.csv
-            date_str = now.strftime("%Y-%m-%d")
+            date_str = now_utc.strftime("%Y-%m-%d")
             filename = f"{symbol}-oi-{date_str}.csv"
             filepath = self.oi_dir / symbol / "1m" / filename
 
             # 确保目录存在
             filepath.parent.mkdir(parents=True, exist_ok=True)
-            
+
             # 检查文件大小，如果超过10MB则进行轮转
             if filepath.exists() and filepath.stat().st_size > 10 * 1024 * 1024:  # 10MB
                 self._rotate_log_file(filepath, symbol, date_str)
-            
+
             # 检查文件是否存在，决定是创建新文件还是追加数据
             file_exists = filepath.exists()
-            
+
             with open(filepath, 'a', encoding='utf-8', newline='') as f:
                 writer = csv.writer(f)
-                
+
                 # 如果是新文件，写入表头（去掉 symbol 列）
                 if not file_exists:
-                    writer.writerow(["timestamp", "datetime", "openInterest", "sumOpenInterestValue"])
-                
-                # 写入数据（去掉 symbol 列）
+                    writer.writerow(["timestamp", "datetime_utc", "openInterest", "sumOpenInterestValue"])
+
+                # 写入数据（使用UTC时间）
+                dt_utc = datetime.utcfromtimestamp(data.get("timestamp", 0) / 1000)
                 writer.writerow([
                     data.get("timestamp", ""),
-                    data.get("datetime", ""),
+                    dt_utc.isoformat() + "Z",  # UTC时间格式
                     data.get("openInterest", ""),
                     data.get("sumOpenInterestValue", "")
                 ])
-            
+
             logger.info(f"保存未平仓合约数据: {filepath}")
             return True
 
@@ -153,7 +154,7 @@ class DataStorage:
 
     def save_oi_history_batch(self, symbol: str, records: List[Dict]) -> bool:
         """
-        保存5分钟历史数据到 data/open_interest/{symbol}/5m 目录
+        保存5分钟历史数据到 data/open_interest/{symbol}/5m 目录（按天存储）
 
         Args:
             symbol: 交易对
@@ -163,12 +164,22 @@ class DataStorage:
             if not records:
                 return True
 
+            # 按日期分组记录
+            records_by_date = {}
             for record in records:
                 ts = record.get("timestamp")
                 if ts is None:
                     continue
-                dt = datetime.fromtimestamp(int(ts) / 1000)
+                # 使用UTC时间
+                dt = datetime.utcfromtimestamp(int(ts) / 1000)
                 date_str = dt.strftime("%Y-%m-%d")
+
+                if date_str not in records_by_date:
+                    records_by_date[date_str] = []
+                records_by_date[date_str].append(record)
+
+            # 为每个日期保存数据
+            for date_str, date_records in records_by_date.items():
                 filename = f"{symbol}-oi-5m-{date_str}.csv"
                 filepath = self.oi_dir / symbol / "5m" / filename
                 filepath.parent.mkdir(parents=True, exist_ok=True)
@@ -177,21 +188,76 @@ class DataStorage:
                 with open(filepath, "a", encoding="utf-8", newline="") as f:
                     writer = csv.writer(f)
                     if not file_exists:
-                        # 5分钟历史数据表头（去掉 symbol）
-                        writer.writerow(["timestamp", "datetime", "openInterest", "sumOpenInterestValue"])
+                        # 历史数据表头
+                        writer.writerow(["timestamp", "datetime_utc", "openInterest", "sumOpenInterestValue"])
 
-                    writer.writerow([
-                        record.get("timestamp", ""),
-                        dt.isoformat(),
-                        record.get("sumOpenInterest", record.get("openInterest", "")),
-                        record.get("sumOpenInterestValue", "")
-                    ])
+                    for record in date_records:
+                        dt = datetime.utcfromtimestamp(int(record.get("timestamp", 0)) / 1000)
+                        writer.writerow([
+                            record.get("timestamp", ""),
+                            dt.isoformat() + "Z",  # UTC时间格式
+                            record.get("sumOpenInterest", record.get("openInterest", "")),
+                            record.get("sumOpenInterestValue", "")
+                        ])
 
-            logger.info(f"保存5分钟历史OI数据: {symbol}, {len(records)} 条")
+            logger.info(f"保存历史OI数据: {symbol}, {len(records)} 条记录，{len(records_by_date)} 个日期")
             return True
         except Exception as e:
-            logger.error(f"保存5分钟历史OI数据失败: {e}")
+            logger.error(f"保存历史OI数据失败: {e}")
             return False
+
+    def is_date_data_exists(self, symbol: str, date_str: str) -> bool:
+        """
+        检查指定日期的数据文件是否存在
+
+        Args:
+            symbol: 交易对
+            date_str: 日期字符串 (YYYY-MM-DD)
+
+        Returns:
+            数据文件是否存在
+        """
+        try:
+            data_file = self.oi_dir / symbol / "5m" / f"{symbol}-oi-5m-{date_str}.csv"
+            return data_file.exists() and data_file.stat().st_size > 0
+        except Exception:
+            return False
+
+    def get_last_downloaded_date(self, symbol: str) -> Optional[str]:
+        """
+        获取指定交易对最后下载的日期
+
+        Args:
+            symbol: 交易对
+
+        Returns:
+            最后下载日期 (YYYY-MM-DD) 或 None
+        """
+        try:
+            symbol_dir = self.oi_dir / symbol / "5m"
+            if not symbol_dir.exists():
+                return None
+
+            # 查找.complete文件，找到最新的日期
+            complete_files = list(symbol_dir.glob("*.complete"))
+            if not complete_files:
+                return None
+
+            # 从文件名中提取日期并找到最新的
+            dates = []
+            for complete_file in complete_files:
+                try:
+                    filename = complete_file.name
+                    if "-oi-5m-" in filename and filename.endswith(".complete"):
+                        date_part = filename.split("-oi-5m-")[1].replace(".complete", "")
+                        dates.append(date_part)
+                except Exception:
+                    continue
+
+            return max(dates) if dates else None
+        except Exception as e:
+            logger.error(f"获取最后下载日期失败 {symbol}: {e}")
+            return None
 
     def get_last_5m_timestamp(self, symbol: str) -> Optional[int]:
         """

@@ -128,94 +128,66 @@ class BinanceOIDownloader:
         logger.info(f"已启动5分钟历史数据线程，交易对数: {len(symbols)}")
 
     def _download_oi_history_for_symbols(self, symbols: List[str]):
-        """后台线程：为多个交易对下载5分钟历史数据（持续循环，默认每5分钟巡检）"""
-        interval_ms = 5 * 60 * 1000
-        batch_span_ms = interval_ms * 1000  # 1000条上限
-        buffer_ms = 60 * 60 * 1000
-        max_lookback_ms = 30 * 24 * 60 * 60 * 1000
+        """后台线程：为多个交易对下载历史数据（按天下载，持续循环）"""
+        from datetime import datetime, timedelta
 
         try:
             while not self.shutdown_requested:
-                server_time_ms = self.downloader.get_server_time()
-                if not server_time_ms:
-                    logger.warning("无法获取服务器时间，跳过本轮5m历史下载")
-                    self.error_handler.handle_error_with_fallback(
-                        symbol="ALL",
-                        error=RuntimeError("server time unavailable for history"),
-                        downloader=self.downloader,
-                        storage=self.storage,
-                        source="history"
-                    )
-                    # 等待下轮
-                    time.sleep(300)
-                    continue
+                # 获取当前UTC日期
+                current_utc = datetime.utcnow()
+                today_str = current_utc.strftime("%Y-%m-%d")
 
-                earliest_allowed = server_time_ms - max_lookback_ms + buffer_ms
-                latest_allowed = server_time_ms - buffer_ms
+                # 检查是否有昨天的数据需要下载（避免下载不完整的数据）
+                yesterday = current_utc - timedelta(days=1)
+                yesterday_str = yesterday.strftime("%Y-%m-%d")
+
+                # 要下载的日期列表（昨天的数据应该已经完整了）
+                dates_to_download = [yesterday_str]
+
+                # 如果是新的一天，也下载今天的数据（到目前为止）
+                if current_utc.hour >= 1:  # 至少过了一个小时再下载今天的数据
+                    dates_to_download.append(today_str)
 
                 for symbol in symbols:
                     if self.shutdown_requested:
                         break
 
                     try:
-                        last_ts = self.storage.get_last_5m_timestamp(symbol)
-                        start_ms = last_ts + interval_ms if last_ts else earliest_allowed
-                        start_ms = max(start_ms, earliest_allowed)
+                        for date_str in dates_to_download:
+                            if self.shutdown_requested:
+                                break
 
-                        # 对齐到5分钟边界
-                        remainder = start_ms % interval_ms
-                        if remainder:
-                            start_ms += (interval_ms - remainder)
+                            # 检查这一天的数据文件是否已经存在
+                            if self.storage.is_date_data_exists(symbol, date_str):
+                                logger.debug(f"{symbol} {date_str} 数据已存在，跳过")
+                                continue
 
-                        logger.info(f"5m历史下载开始 {symbol}: start_ms={start_ms}, latest_allowed={latest_allowed}")
+                            logger.info(f"下载历史数据: {symbol} {date_str}")
 
-                        current_start = start_ms
-                        while current_start <= latest_allowed and not self.shutdown_requested:
-                            end_ms = min(current_start + batch_span_ms, latest_allowed)
+                            # 下载这一天的数据
                             data = self.downloader.get_oi_history(
                                 symbol,
-                                start_time_ms=current_start,
-                                end_time_ms=end_ms,
-                                limit=1000,
-                                interval_minutes=5
+                                date_str=date_str,
+                                limit=1000
                             )
-                            if not data:
-                                logger.warning(f"{symbol} 5m历史下载返回空，终止该交易对")
-                                self.error_handler.handle_error_with_fallback(
-                                    symbol=symbol,
-                                    error=RuntimeError("history fetch returned empty"),
-                                    downloader=self.downloader,
-                                    storage=self.storage,
-                                    source="history"
-                                )
-                                break
 
-                            # 保存
+                            if not data:
+                                logger.warning(f"{symbol} {date_str} 历史数据下载为空")
+                                continue
+
+                            # 保存数据
                             saved = self.storage.save_oi_history_batch(symbol, data)
                             if not saved:
-                                logger.error(f"{symbol} 5m历史数据保存失败，终止该交易对")
-                                self.error_handler.handle_error_with_fallback(
-                                    symbol=symbol,
-                                    error=RuntimeError("history save failed"),
-                                    downloader=self.downloader,
-                                    storage=self.storage,
-                                    source="history"
-                                )
-                                break
+                                logger.error(f"{symbol} {date_str} 历史数据保存失败")
+                                continue
 
-                            last_entry_ts = int(data[-1].get("timestamp", current_start))
-                            # 防止卡住：返回数据未前进，通常表示已到达可下载的最新时间
-                            if last_entry_ts <= current_start:
-                                break
-
-                            current_start = last_entry_ts + interval_ms
+                            logger.info(f"完成历史数据下载: {symbol} {date_str} ({len(data)} 条记录)")
 
                             # 轻微节流
-                            time.sleep(0.1)
+                            time.sleep(0.5)
 
-                        logger.info(f"5m历史下载完成 {symbol}")
                     except Exception as e:
-                        logger.error(f"5m历史下载异常 {symbol}: {e}")
+                        logger.error(f"历史数据下载异常 {symbol}: {e}")
                         self.error_handler.handle_error_with_fallback(
                             symbol=symbol,
                             error=e,
@@ -225,15 +197,15 @@ class BinanceOIDownloader:
                         )
                         continue
 
-                # 本轮完成，等下一轮（5分钟），可随时通过 shutdown 请求终止
-                sleep_seconds = 300
-                for _ in range(sleep_seconds):
+                # 等待下一轮检查（每小时检查一次）
+                logger.info("历史数据下载轮次完成，等待下一轮...")
+                for _ in range(3600):  # 3600秒 = 1小时
                     if self.shutdown_requested:
                         break
                     time.sleep(1)
 
         except Exception as e:
-            logger.error(f"5m历史下载线程异常: {e}")
+            logger.error(f"历史数据下载线程异常: {e}")
             self.error_handler.handle_error_with_fallback(
                 symbol="ALL",
                 error=e,
@@ -260,13 +232,12 @@ class BinanceOIDownloader:
         signal.signal(signal.SIGINT, signal_handler)  # Ctrl+C
         signal.signal(signal.SIGTERM, signal_handler)  # kill命令
 
-    def _scan_and_fill_gaps(self, symbols: List[str], interval_minutes: int = 5):
+    def _scan_and_fill_gaps(self, symbols: List[str]):
         """
-        扫描文件系统，查找缺失的数据点并补全
+        扫描文件系统，查找缺失的数据点并补全（使用5分钟间隔）
 
         Args:
             symbols: 交易对列表
-            interval_minutes: 时间间隔（分钟）
         """
         from datetime import datetime, timedelta
         import os
@@ -288,7 +259,7 @@ class BinanceOIDownloader:
 
         while current_time <= now:
             expected_timestamps.append(int(current_time.timestamp() * 1000))
-            current_time += timedelta(minutes=interval_minutes)
+            current_time += timedelta(minutes=5)
 
         logger.info(f"期望的数据点数量: {len(expected_timestamps)}")
 
@@ -575,84 +546,6 @@ class BinanceOIDownloader:
         workers = min(max(1, cpu_cnt * 2), 32, symbol_count)
         return workers
 
-    def cleanup_old_data(self, days: int = 30):
-        """
-        Clean up old data
-
-        Args:
-            days: Number of days to retain
-        """
-        logger.info(f"Starting cleanup of data older than {days} days")
-
-        # 清理文件
-        self.storage.cleanup_old_files(days)
-
-        # 清理错误处理器记录
-        self.error_handler.clear_old_errors(days)
-
-        logger.info("Data cleanup completed")
-
-    def start_scheduled_download(self, symbols: List[str], interval_minutes: int = 1):
-        """
-        Start scheduled download
-
-        Args:
-            symbols: List of symbols to download
-            interval_minutes: Download interval in minutes
-        """
-        logger.info("开始定时下载任务")
-        execution_count = 0
-
-        def download_job():
-            nonlocal execution_count
-
-            if self.shutdown_requested:
-                logger.info("Shutdown requested, stopping scheduled download")
-                return
-
-            execution_count += 1
-            current_time = datetime.now()
-            logger.info(f"Starting scheduled download task #{execution_count} - {len(symbols)} symbols")
-
-            success_count = 0
-            for i, symbol in enumerate(symbols, 1):
-                if self.shutdown_requested:
-                    logger.info("Shutdown requested during symbol processing")
-                    break
-
-                try:
-                    logger.info(f"Processing {i}/{len(symbols)}: {symbol}")
-                    success = self.download_with_minute_timestamp(symbol, use_integer_minute=True)
-                    if success:
-                        success_count += 1
-                    else:
-                        logger.warning(f"Scheduled download failed for {symbol}")
-                except Exception as e:
-                    logger.error(f"Error during scheduled download of {symbol}: {e}")
-
-            logger.info(f"Scheduled download task #{execution_count} completed: {success_count}/{len(symbols)} successful")
-
-        # 等待到下一个整数分钟
-        def wait_for_next_minute():
-            now = datetime.now()
-            next_minute = now.replace(second=0, microsecond=0) + timedelta(minutes=1)
-            sleep_time = (next_minute - now).total_seconds()
-            logger.info(f"等待 {sleep_time:.1f} 秒到下一个整数分钟 {next_minute.strftime('%H:%M')}")
-            time.sleep(sleep_time)
-        
-        # 立即执行一次
-        download_job()
-        
-        # 开始调度循环
-        try:
-            while not self.shutdown_requested:
-                wait_for_next_minute()
-                download_job()
-        except KeyboardInterrupt:
-            logger.info("Scheduled download interrupted by user")
-        finally:
-            logger.info("Scheduled download stopped")
-
     def download_continuous(self, symbols: List[str], duration_hours: Optional[float] = None):
         """
         Download continuously for specified duration
@@ -720,9 +613,8 @@ def main():
     parser = argparse.ArgumentParser(description="Binance Open Interest Downloader - Download futures open interest data")
     parser.add_argument("--symbols", "-S", nargs="+", help="指定交易对符号（单个或多个，用空格分隔）")
     parser.add_argument("--stats", action="store_true", help="显示统计信息")
-    parser.add_argument("--cleanup", type=int, metavar="DAYS", help="清理指定天数前的旧数据")
     parser.add_argument("--hours", "-c", type=float, metavar="HOURS", help="持续下载指定小时数")
-    parser.add_argument("--history-only", action="store_true", help="仅下载5分钟历史数据，不进行实时下载")
+    parser.add_argument("--history-only", type=int, metavar="MINUTES", nargs='?', const=60, help="仅下载5分钟历史数据，指定运行分钟数（默认60分钟）")
 
     args = parser.parse_args()
 
@@ -779,9 +671,17 @@ def main():
     # 启动5分钟历史数据后台线程
     downloader.start_oi_history_worker(target_symbols)
 
-    # 如果仅需历史数据，启动后直接返回，不做实时下载
+    # 如果仅需历史数据，启动后等待指定时间
     if args.history_only:
-        logger.info("仅下载5分钟历史数据，不执行实时下载")
+        run_minutes = args.history_only
+        logger.info(f"仅下载5分钟历史数据，运行 {run_minutes} 分钟后退出")
+        try:
+            # 等待历史数据下载线程运行指定时间，然后退出
+            import time
+            logger.info("等待历史数据下载中... (按Ctrl+C退出)")
+            time.sleep(run_minutes * 60)  # 等待指定分钟数
+        except KeyboardInterrupt:
+            logger.info("用户中断历史数据下载")
         return
 
     try:
@@ -789,17 +689,13 @@ def main():
             # 显示统计信息
             downloader.show_statistics()
 
-        elif args.cleanup:
-            # 清理旧数据
-            downloader.cleanup_old_data(args.cleanup)
-
-        elif not any([args.stats, args.cleanup, args.hours]):
-            # 定时下载模式（每1分钟拉取一次）
-            interval_minutes = 1
+        elif not any([args.stats, args.hours]):
+            # 定时下载模式（每5分钟拉取一次）
+            interval_minutes = 5
             print(f"启动定时模式，每 {interval_minutes} 分钟拉取: {target_symbols}")
             print(f"使用的配置文件: {config_manager.get_config_path()}")
             print(config_manager.get_config_summary())
-            logger.info("按整数分钟调度")
+            logger.info("按5分钟间隔调度")
 
             def scheduled_job():
                 if downloader.shutdown_requested:
